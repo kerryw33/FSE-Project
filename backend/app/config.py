@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     session_expire_hours: int = 12
     kyc_encryption_key: str = ""
 
+    # FR-13: fixed, configured USD/ZAR rate for this slice. Swappable later
+    # for a public API without touching any caller of get_usd_zar_rate().
+    usd_zar_rate: float = 18.50
+
 
 @lru_cache
 def get_settings() -> Settings:

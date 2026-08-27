@@ -33,7 +33,14 @@ app.dependency_overrides[get_db] = override_get_db
 
 @pytest.fixture(autouse=True)
 def _fresh_database():
+    from app.services.bootstrap import seed_defaults
+
     Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        seed_defaults(db)
+    finally:
+        db.close()
     yield
     Base.metadata.drop_all(bind=engine)
 
