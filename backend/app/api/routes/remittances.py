@@ -1,15 +1,16 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session as DBSession
 
-from app.core.deps import require_approved_kyc
+from app.core.deps import get_current_user, require_admin, require_approved_kyc
 from app.database import get_db
 from app.models.beneficiary import Beneficiary
 from app.models.fee_config import FeeConfig
-from app.models.remittance import Remittance
+from app.models.remittance import Remittance, RemittanceStatus
 from app.models.user import User
-from app.schemas.remittance import RemittanceOut, RemittanceQuoteRequest
+from app.schemas.remittance import CashInInitiateRequest, RemittanceOut, RemittanceQuoteRequest
 from app.services.exchange_rate import get_usd_zar_rate
 from app.services.limits import get_tier_limits, tier_for_user, usage_this_month, usage_today
 from app.services.quote import build_quote
@@ -83,6 +84,85 @@ def create_remittance_quote(
         estimated_cash_out_fee=quote.estimated_cash_out_fee,
         estimated_recipient_payout=quote.estimated_recipient_payout,
     )
+    db.add(remittance)
+    db.commit()
+    db.refresh(remittance)
+    return remittance
+
+
+@router.get("", response_model=list[RemittanceOut])
+def list_remittances(
+    remittance_status: RemittanceStatus | None = None,
+    _admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    """FR-34: admin interface for finding remittances awaiting cash-in
+    confirmation (typically filtered to cash_in_pending)."""
+    query = db.query(Remittance)
+    if remittance_status is not None:
+        query = query.filter(Remittance.status == remittance_status)
+    return query.order_by(Remittance.created_at.desc()).all()
+
+
+@router.post("/{remittance_id}/cash-in", response_model=RemittanceOut)
+def initiate_cash_in(
+    remittance_id: str,
+    payload: CashInInitiateRequest,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    """FR-18: the sender initiates a simulated ZAR cash-in payment for
+    their own quote, via one supported method."""
+    remittance = (
+        db.query(Remittance)
+        .filter(Remittance.id == remittance_id, Remittance.sender_id == current_user.id)
+        .first()
+    )
+    if remittance is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Remittance not found")
+    if remittance.status != RemittanceStatus.QUOTED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cash-in can only be initiated from status 'quoted' (current: '{remittance.status.value}')",
+        )
+
+    remittance.cash_in_method = payload.method
+    remittance.cash_in_initiated_at = datetime.now(timezone.utc)
+    remittance.status = RemittanceStatus.CASH_IN_PENDING
+    db.add(remittance)
+    db.commit()
+    db.refresh(remittance)
+    return remittance
+
+
+@router.post("/{remittance_id}/confirm-cash-in", response_model=RemittanceOut)
+def confirm_cash_in(
+    remittance_id: str,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    """FR-19/FR-34: admin (standing in for a mock payment service) confirms
+    a simulated ZAR cash-in has been received.
+
+    FR-20: no settlement is triggered here - that mechanism doesn't exist
+    yet (FR-21 onward). CASH_IN_CONFIRMED is simply the state the future
+    settlement worker will pick up from.
+    """
+    remittance = db.query(Remittance).filter(Remittance.id == remittance_id).first()
+    if remittance is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Remittance not found")
+    if remittance.status != RemittanceStatus.CASH_IN_PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cash-in can only be confirmed from status 'cash_in_pending' "
+                f"(current: '{remittance.status.value}')"
+            ),
+        )
+
+    remittance.status = RemittanceStatus.CASH_IN_CONFIRMED
+    remittance.cash_in_confirmed_at = datetime.now(timezone.utc)
+    remittance.cash_in_confirmed_by = admin.id
     db.add(remittance)
     db.commit()
     db.refresh(remittance)

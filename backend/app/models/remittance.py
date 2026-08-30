@@ -10,12 +10,21 @@ from app.database import Base
 
 
 class RemittanceStatus(str, enum.Enum):
-    """Only QUOTED exists in this slice. Cash-in confirmation and
-    settlement states are added when FR-18 onward (Simulated Cash-In,
-    Queue & Settlement) are implemented - this row is designed to be
-    extended in place rather than replaced."""
+    """Settlement/queue states (FR-21 onward: SETTLEMENT_QUEUED, SETTLED,
+    FAILED) are added when Queue & Settlement is implemented - this row is
+    designed to be extended in place rather than replaced."""
 
     QUOTED = "quoted"
+    CASH_IN_PENDING = "cash_in_pending"
+    CASH_IN_CONFIRMED = "cash_in_confirmed"
+
+
+class CashInMethod(str, enum.Enum):
+    """FR-18: one supported simulated ZAR payment method per remittance."""
+
+    AGENT_CASH = "agent_cash"
+    BANK_TRANSFER = "bank_transfer"
+    CARD = "card"
 
 
 def _uuid() -> str:
@@ -31,6 +40,13 @@ class Remittance(Base):
     against (see app.services.limits) - creating a quote counts as
     "the transaction proceeding" for limit purposes, since no later
     confirmation step exists yet.
+
+    FR-18/FR-19/FR-20: the sender initiates a simulated cash-in (locking in
+    a method and moving to CASH_IN_PENDING), and an admin confirms receipt
+    (moving to CASH_IN_CONFIRMED). No settlement mechanism exists yet
+    (that's FR-21 onward), so FR-20's "must not begin settlement before
+    cash-in is confirmed" is trivially satisfied for now - CASH_IN_CONFIRMED
+    is simply the state the future settlement worker will watch for.
     """
 
     __tablename__ = "remittances"
@@ -52,9 +68,14 @@ class Remittance(Base):
         Enum(RemittanceStatus), default=RemittanceStatus.QUOTED, nullable=False
     )
 
+    cash_in_method: Mapped[CashInMethod | None] = mapped_column(Enum(CashInMethod), nullable=True)
+    cash_in_initiated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cash_in_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cash_in_confirmed_by: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    sender: Mapped["User"] = relationship("User")
+    sender: Mapped["User"] = relationship("User", foreign_keys=[sender_id])
     beneficiary: Mapped["Beneficiary"] = relationship("Beneficiary")
