@@ -1,18 +1,16 @@
 from sqlalchemy.orm import Session as DBSession
 from xrpl.account import get_balance
-from xrpl.models.amounts import IssuedCurrencyAmount
-from xrpl.models.transactions import TrustSet
-from xrpl.transaction import submit_and_wait
-from xrpl.wallet import Wallet, generate_faucet_wallet
 
-from app.config import get_settings
 from app.models.platform_wallet import PlatformWallet
 from app.services.xrpl_client import get_xrpl_client
+from app.services.xrpl_provisioning import establish_trustline as _establish_trustline
+from app.services.xrpl_provisioning import generate_and_fund_wallet
 
 
 def get_platform_wallet_row(db: DBSession) -> PlatformWallet | None:
-    """Pooled-wallet model (see project memory "pooled wallet
-    architecture"): at most one row should ever exist."""
+    """Only one row should ever exist - it's the single treasury account
+    that funds every recipient's custodial wallet (see project memory
+    "pooled wallet architecture")."""
     return db.query(PlatformWallet).first()
 
 
@@ -25,8 +23,7 @@ def get_or_create_platform_wallet(db: DBSession) -> PlatformWallet:
     if existing is not None:
         return existing
 
-    client = get_xrpl_client()
-    funded_wallet = generate_faucet_wallet(client, debug=False)
+    funded_wallet = generate_and_fund_wallet()
 
     row = PlatformWallet(
         classic_address=funded_wallet.classic_address,
@@ -46,28 +43,16 @@ def establish_trustline(db: DBSession, wallet_row: PlatformWallet) -> str:
     The secret is decrypted only for the moment of signing and is never
     logged or returned to any caller (NFR-05).
     """
-    settings = get_settings()
-    client = get_xrpl_client()
-    wallet = Wallet.from_seed(wallet_row.secret)
+    from xrpl.wallet import Wallet
 
-    trust_set = TrustSet(
-        account=wallet.classic_address,
-        limit_amount=IssuedCurrencyAmount(
-            currency=settings.xrpl_currency_code,
-            issuer=settings.xrpl_issuer_address,
-            value=settings.xrpl_trustline_limit,
-        ),
-    )
-    response = submit_and_wait(trust_set, client, wallet)
-    tx_result = response.result["meta"]["TransactionResult"]
-    if tx_result != "tesSUCCESS":
-        raise RuntimeError(f"TrustSet failed: {tx_result}")
+    wallet = Wallet.from_seed(wallet_row.secret)
+    tx_hash = _establish_trustline(wallet)
 
     wallet_row.trustline_established = True
     db.add(wallet_row)
     db.commit()
     db.refresh(wallet_row)
-    return response.result["hash"]
+    return tx_hash
 
 
 def get_xrp_balance(wallet_row: PlatformWallet) -> str:

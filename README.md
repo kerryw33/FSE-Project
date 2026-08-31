@@ -1,25 +1,27 @@
 # XRPL-Based FX Remittance Platform (RLUSD)
 
 UCT ECO5040W group project. Prototype cross-border remittance platform: ZAR
-in, RLUSD settlement on the XRP Ledger Testnet, simulated fiat cash-out.
+in, RLUSD/UCTUSD settlement on the XRP Ledger Testnet, simulated fiat
+cash-out.
 
 ## Status
 
-Implemented so far (FR-01–FR-09a): registration, login/logout, profile
-view/update, KYC submission + status, admin KYC review, and the
-`require_approved_kyc` guard that future remittance/cash-out endpoints will
-depend on. Everything else in `functional_requirements.pdf` (beneficiaries,
-quotes, cash-in, queue/settlement, wallet, cash-out, fee/limit admin) is not
-built yet.
+All functional requirements (FR-01 through FR-35, including lettered
+sub-requirements) from `functional_requirements.pdf` are implemented and
+tested - registration/login/logout/profile, KYC + admin review, beneficiary
+management with auto-linking, quote/fee/limit calculation with admin config,
+simulated cash-in, a DB-backed settlement queue + worker that submits real
+XRPL Payment transactions, the recipient's custodial wallet, sender
+transaction history, and simulated cash-out with admin actioning. Not yet
+done: the web front end (currently API-only, explorable via `/docs`) and the
+performance-testing deliverable.
 
 ## Stack
 
 FastAPI + SQLAlchemy + SQLite (dev), per `basics.pdf`'s recommendations.
 Passwords hashed with bcrypt via passlib. Sessions are opaque bearer tokens
 stored in a `sessions` table (not JWT) so logout can just revoke a row.
-Sensitive KYC fields (identification number) are encrypted at rest with
-Fernet, key supplied via `KYC_ENCRYPTION_KEY` env var, kept out of the
-database per NFR-04/NFR-08a.
+XRPL integration uses `xrpl-py` against the public Testnet JSON-RPC endpoint.
 
 ## Key assumptions (to carry into the technical specification)
 
@@ -30,6 +32,31 @@ database per NFR-04/NFR-08a.
 - **KYC resubmission**: one KYC row per user. A rejected (or still pending)
   application can be resubmitted, which overwrites the details and resets
   status to `pending`. Once `approved`, resubmission is blocked (409).
+- **Beneficiary linking (FR-12a/12c)**: auto-match on mobile/email against
+  an existing account, either immediately at creation or retroactively when
+  a matching account registers later - not an invite-to-register flow.
+- **Wallet model**: a hybrid of the brief's two options. One platform
+  treasury wallet (`PlatformWallet`) holds the team's UCTUSD/RLUSD liquidity;
+  each recipient still gets a real, platform-controlled custodial XRPL
+  Testnet account (`RecipientWallet`), generated lazily on first settlement.
+  This lets FR-22/23 produce a genuine, individually attributable on-chain
+  Payment + tx hash per remittance, while only the one treasury wallet needs
+  scarce token liquidity (XRP funding and TrustLines are free/unlimited via
+  the faucet). `RecipientWallet.balance` is a cached ledger view of that
+  account's real on-chain balance.
+- **Message queue**: implemented as a DB-backed table (`SettlementMessage`)
+  rather than RabbitMQ/Redis Streams/Kafka - none were available to stand up
+  in this environment (no broker installed, Docker daemon not running). The
+  enqueue/claim/ack contract matches a real broker, so swapping one in later
+  only touches `app/services/settlement.py`.
+- **Fee model**: a single admin-editable `FeeConfig` row (fixed fee, %
+  fee, FX margin, cash-out fee) rather than a versioned/historical table.
+- **Limit tiers (FR-16b)**: derived from KYC status (approved → `verified`,
+  everything else → `unverified`) rather than a separately stored field.
+- **Currency (basics.pdf, "RLUSD vs our own IOU")**: issuer address and
+  currency code are config values (`XRPL_ISSUER_ADDRESS`,
+  `XRPL_CURRENCY_CODE`), currently pointed at the course-provided UCTUSD
+  fallback token - switching to real RLUSD is a one-line `.env` change.
 
 ## Running locally
 
@@ -37,7 +64,7 @@ database per NFR-04/NFR-08a.
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then set KYC_ENCRYPTION_KEY, see comment in the file
+cp .env.example .env   # then set the two encryption keys, see comments in the file
 uvicorn app.main:app --reload
 ```
 
@@ -49,6 +76,18 @@ Create an admin account:
 python -m scripts.create_admin "Admin Name" admin@example.com +27000000000 <password>
 ```
 
+Set up the platform's XRPL wallet (once per environment):
+
+```bash
+python -m scripts.setup_platform_wallet
+```
+
+Run one pass of the settlement worker (or POST `/admin/settlement/run`):
+
+```bash
+python -m scripts.run_settlement_worker
+```
+
 ## Tests
 
 ```bash
@@ -56,3 +95,8 @@ cd backend
 source .venv/bin/activate
 python -m pytest -q
 ```
+
+All XRPL network calls (faucet funding, TrustSet, Payment) are mocked in the
+test suite (see the `mock_xrpl` fixture in `tests/conftest.py`) so it runs
+fast and offline - the real integration is exercised manually against the
+live Testnet instead.

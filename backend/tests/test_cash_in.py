@@ -78,7 +78,13 @@ def test_cannot_confirm_cash_in_before_initiation(client, approved_sender, admin
 
 
 def test_confirm_cash_in_success(client, approved_sender, admin_headers):
-    """FR-19: admin confirms a simulated ZAR cash-in has been received."""
+    """FR-19: admin confirms a simulated ZAR cash-in has been received.
+
+    FR-20/FR-21: confirming immediately enqueues settlement, so the
+    status has already moved on to 'settlement_queued' by the time this
+    response comes back - cash_in_confirmed_at still records the moment
+    FR-19's confirmation itself happened.
+    """
     headers = approved_sender()
     remittance_id = _create_quote(client, headers)
     client.post(f"/remittances/{remittance_id}/cash-in", json={"method": "bank_transfer"}, headers=headers)
@@ -86,7 +92,7 @@ def test_confirm_cash_in_success(client, approved_sender, admin_headers):
     resp = client.post(f"/remittances/{remittance_id}/confirm-cash-in", headers=admin_headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "cash_in_confirmed"
+    assert body["status"] == "settlement_queued"
     assert body["cash_in_confirmed_at"] is not None
 
 

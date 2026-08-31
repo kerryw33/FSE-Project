@@ -14,6 +14,7 @@ from app.schemas.remittance import CashInInitiateRequest, RemittanceOut, Remitta
 from app.services.exchange_rate import get_usd_zar_rate
 from app.services.limits import get_tier_limits, tier_for_user, usage_this_month, usage_today
 from app.services.quote import build_quote
+from app.services.settlement import enqueue_settlement
 
 router = APIRouter(prefix="/remittances", tags=["remittances"])
 
@@ -90,6 +91,19 @@ def create_remittance_quote(
     return remittance
 
 
+@router.get("/me", response_model=list[RemittanceOut])
+def list_my_remittances(current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    """FR-28a: sender views the status and history of remittances they've
+    sent - quote details, cash-in status, settlement status, and the XRPL
+    transaction hash where applicable."""
+    return (
+        db.query(Remittance)
+        .filter(Remittance.sender_id == current_user.id)
+        .order_by(Remittance.created_at.desc())
+        .all()
+    )
+
+
 @router.get("", response_model=list[RemittanceOut])
 def list_remittances(
     remittance_status: RemittanceStatus | None = None,
@@ -144,9 +158,9 @@ def confirm_cash_in(
     """FR-19/FR-34: admin (standing in for a mock payment service) confirms
     a simulated ZAR cash-in has been received.
 
-    FR-20: no settlement is triggered here - that mechanism doesn't exist
-    yet (FR-21 onward). CASH_IN_CONFIRMED is simply the state the future
-    settlement worker will pick up from.
+    FR-20/FR-21: confirming immediately enqueues the settlement message -
+    no settlement can happen before cash-in is confirmed, since this is
+    the only place a message is ever created.
     """
     remittance = db.query(Remittance).filter(Remittance.id == remittance_id).first()
     if remittance is None:
@@ -165,5 +179,8 @@ def confirm_cash_in(
     remittance.cash_in_confirmed_by = admin.id
     db.add(remittance)
     db.commit()
+    db.refresh(remittance)
+
+    enqueue_settlement(db, remittance)
     db.refresh(remittance)
     return remittance

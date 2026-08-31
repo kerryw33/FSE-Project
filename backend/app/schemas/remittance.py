@@ -33,4 +33,7 @@ class RemittanceOut(BaseModel):
     cash_in_method: CashInMethod | None
     cash_in_initiated_at: datetime | None
     cash_in_confirmed_at: datetime | None
+    xrpl_settlement_tx_hash: str | None
+    settled_at: datetime | None
+    settlement_failure_reason: str | None
     created_at: datetime
