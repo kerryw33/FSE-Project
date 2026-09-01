@@ -85,6 +85,16 @@ sections in `functional_requirements.pdf`.
   transport, not the source of truth, which is why switching from the
   earlier DB-polling prototype only touched one service file and no
   correctness logic (`process_settlement_message`) at all.
+- **`process_pending_settlements` fully drains the stream, not a single
+  bounded batch** - it loops reading up to `batch_size` (50) entries at a
+  time until a read comes back short. This was a real bug once fixed
+  during development: a benchmarking script left ~200 orphaned stream
+  entries (deleted their DB rows without removing the corresponding
+  stream entries), and because Redis Streams deliver strictly in FIFO
+  order, a single bounded read got stuck acking through that phantom
+  backlog and never reached a genuinely pending settlement behind it.
+  Looping until caught up to the live edge fixes both that specific
+  failure mode and the general case of any backlog larger than one batch.
 - **No PEL reclaim / redelivery-on-crash**: if a worker died mid-processing
   after Redis delivered it a message but before acking, that entry would
   sit in the consumer group's pending-entries list rather than being

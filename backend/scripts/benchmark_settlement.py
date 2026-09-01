@@ -2,7 +2,8 @@
 doesn't cover, since mixing them into the concurrent-user run would measure
 external network/faucet latency rather than the API's own performance:
 
-- message-queue throughput: SettlementMessage enqueue rate (pure DB writes)
+- message-queue throughput: SettlementMessage enqueue rate (a DB write plus
+  a Redis Stream XADD)
 - RLUSD/UCTUSD transaction processing time: real XRPL Testnet Payment per
   settled remittance
 
@@ -28,10 +29,11 @@ from app.models.remittance import Remittance, RemittanceStatus  # noqa: E402
 from app.models.settlement import SettlementMessage  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services.beneficiary_linking import try_link_beneficiary  # noqa: E402
+from app.services.redis_client import get_redis_client  # noqa: E402
 from app.services.exchange_rate import get_usd_zar_rate  # noqa: E402
 from app.services.platform_wallet import get_platform_wallet_row  # noqa: E402
 from app.services.quote import build_quote  # noqa: E402
-from app.services.settlement import enqueue_settlement, process_settlement_message  # noqa: E402
+from app.services.settlement import STREAM_NAME, enqueue_settlement, process_pending_settlements  # noqa: E402
 
 
 def _get_or_create_user(db, email, mobile, full_name):
@@ -92,13 +94,28 @@ def benchmark_queue_throughput(db, sender, beneficiary, fee_config, base_rate, n
     remittances = [_make_confirmed_remittance(db, sender, beneficiary, fee_config, base_rate) for _ in range(n)]
 
     start = time.perf_counter()
-    for remittance in remittances:
-        enqueue_settlement(db, remittance)
+    messages = [enqueue_settlement(db, remittance) for remittance in remittances]
     elapsed = time.perf_counter() - start
 
     print(f"Message-queue enqueue: {n} messages in {elapsed:.3f}s ({n / elapsed:.1f} msg/s)")
 
-    # Cleanup - these existed only to time the enqueue path, not to be settled.
+    # Cleanup - these existed only to time the enqueue path, not to be
+    # settled. Must remove both the DB rows AND the Redis stream entries
+    # enqueue_settlement published: deleting the DB row does not undo the
+    # XADD, and a dangling entry sits ahead of real work in the stream's
+    # FIFO order, forcing every future read to burn through it first (this
+    # caused a real bug once - a backlog of these starved a genuine
+    # pending settlement out of a single bounded read).
+    redis_client = get_redis_client()
+    message_ids = {message.id for message in messages}
+    entries_to_remove = [
+        entry_id
+        for entry_id, fields in redis_client.xrevrange(STREAM_NAME, count=n)
+        if fields.get("settlement_message_id") in message_ids
+    ]
+    if entries_to_remove:
+        redis_client.xdel(STREAM_NAME, *entries_to_remove)
+
     for remittance in remittances:
         db.query(SettlementMessage).filter(SettlementMessage.remittance_id == remittance.id).delete()
         db.delete(remittance)
@@ -107,10 +124,11 @@ def benchmark_queue_throughput(db, sender, beneficiary, fee_config, base_rate, n
 
 def benchmark_settlement_processing(db, sender, beneficiary, fee_config, base_rate, n=5):
     remittances = [_make_confirmed_remittance(db, sender, beneficiary, fee_config, base_rate) for _ in range(n)]
-    messages = [enqueue_settlement(db, r) for r in remittances]
+    for remittance in remittances:
+        enqueue_settlement(db, remittance)
 
     start = time.perf_counter()
-    results = [process_settlement_message(db, m) for m in messages]
+    results = process_pending_settlements(db, batch_size=n)
     elapsed = time.perf_counter() - start
 
     completed = [r for r in results if r.status.value == "completed"]

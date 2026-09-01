@@ -146,11 +146,21 @@ def process_settlement_message(db: DBSession, message: SettlementMessage) -> Set
     return message
 
 
-def process_pending_settlements(db: DBSession, count: int = 50, block_ms: int = 500) -> list[SettlementMessage]:
-    """FR-22: the settlement worker's main loop body - read whatever's
-    waiting on the Redis Stream, process each one, and ack it. This is
-    what both the standalone worker script and the admin-triggered manual
-    run call.
+def process_pending_settlements(db: DBSession, batch_size: int = 50, block_ms: int = 200) -> list[SettlementMessage]:
+    """FR-22: the settlement worker's main loop body - fully drain whatever
+    is waiting on the Redis Stream, processing and acking each entry. This
+    is what both the standalone worker script and the admin-triggered
+    manual run call.
+
+    Loops rather than reading a single bounded batch: `count` on
+    XREADGROUP caps one call, so a single read would leave anything past
+    the cap stuck behind it until the next call - including a backlog of
+    entries whose SettlementMessage row no longer exists (skipped as a
+    no-op below, but they still occupy stream position and must be acked
+    past before real work behind them is ever reached). Looping until a
+    batch comes back smaller than requested means one call always
+    processes everything currently available, not just the first
+    `batch_size` items in FIFO order.
 
     Acks immediately after processing regardless of outcome - retries are
     handled explicitly via retry_settlement_message(), not via Redis's own
@@ -160,15 +170,23 @@ def process_pending_settlements(db: DBSession, count: int = 50, block_ms: int = 
     client = get_redis_client()
     _ensure_consumer_group(client)
 
-    response = client.xreadgroup(GROUP_NAME, CONSUMER_NAME, {STREAM_NAME: ">"}, count=count, block=block_ms)
-
     results = []
-    for _stream_name, entries in response:
-        for entry_id, fields in entries:
-            settlement_message_id = fields.get("settlement_message_id")
-            message = db.query(SettlementMessage).filter(SettlementMessage.id == settlement_message_id).first()
-            if message is not None:
-                results.append(process_settlement_message(db, message))
-            client.xack(STREAM_NAME, GROUP_NAME, entry_id)
+    while True:
+        response = client.xreadgroup(GROUP_NAME, CONSUMER_NAME, {STREAM_NAME: ">"}, count=batch_size, block=block_ms)
+        if not response:
+            break
+
+        entries_seen = 0
+        for _stream_name, entries in response:
+            entries_seen += len(entries)
+            for entry_id, fields in entries:
+                settlement_message_id = fields.get("settlement_message_id")
+                message = db.query(SettlementMessage).filter(SettlementMessage.id == settlement_message_id).first()
+                if message is not None:
+                    results.append(process_settlement_message(db, message))
+                client.xack(STREAM_NAME, GROUP_NAME, entry_id)
+
+        if entries_seen < batch_size:
+            break  # caught up to the live edge of the stream
 
     return results
