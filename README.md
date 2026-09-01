@@ -24,6 +24,9 @@ stored in a `sessions` table (not JWT) so logout can just revoke a row.
 XRPL integration uses `xrpl-py` against the public Testnet JSON-RPC endpoint.
 The settlement queue is Redis Streams (`redis-py`), per basics.pdf's
 recommendation - requires a local Redis instance (`brew install redis`).
+The USD/ZAR exchange rate is fetched from a live public API
+(open.er-api.com, no key needed), cached for 5 minutes, falling back to a
+configured static rate if that API is ever unreachable.
 
 ## Key assumptions (to carry into the technical specification)
 

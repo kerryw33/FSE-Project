@@ -52,6 +52,24 @@ def _fresh_database():
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _fallback_exchange_rate(monkeypatch):
+    """Forces the deterministic configured-rate fallback for every test by
+    default - most quote/cash-out tests assert exact fee math and would
+    otherwise depend on whatever a live third-party API happens to return
+    at test-run time. Also resets the module-level cache between tests so
+    one test's mocked rate can never leak into another.
+
+    A test that specifically wants to exercise the live-fetch path
+    re-monkeypatches `_fetch_live_rate` itself (see test_exchange_rate.py).
+    """
+    from app.services import exchange_rate
+
+    monkeypatch.setattr(exchange_rate, "_fetch_live_rate", lambda: None)
+    exchange_rate._cache["rate"] = None
+    exchange_rate._cache["fetched_at"] = 0.0
+
+
 @pytest.fixture
 def client():
     with TestClient(app) as c:

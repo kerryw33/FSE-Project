@@ -51,11 +51,19 @@ sections in `functional_requirements.pdf`.
 
 ## Quote, Fees & Limits (FR-13–17)
 
-- **Exchange rate**: a static configured value (`USD_ZAR_RATE` env var),
-  not a live public API - one of the three options the brief explicitly
-  permits ("public API, mock service, or configured rate table"). Unlike
-  fees, there's currently no admin API to change it at runtime; changing
-  it means editing `.env` and restarting.
+- **Exchange rate**: fetched from a live public API (open.er-api.com,
+  free, no key required) - the first of the three options the brief
+  permits ("public API, mock service, or configured rate table"),
+  switched from the configured-rate-table option used earlier in
+  development. Cached for 5 minutes (`EXCHANGE_RATE_CACHE_SECONDS`) so 50
+  concurrent quote requests don't turn into 50 concurrent calls to a free
+  third-party service. Falls back to the static configured rate
+  (`USD_ZAR_RATE`) if the live fetch fails for any reason (network error,
+  timeout, malformed response) - quote creation, a core user-journey step,
+  shouldn't break because a free external API had a blip. Unlike fees,
+  there's still no admin API to change the *fallback* value at runtime;
+  changing it means editing `.env` and restarting - only matters while the
+  live API itself is down.
 - **Fee model**: a single admin-editable `FeeConfig` row (fixed fee, %
   fee, FX margin, cash-out fee), not a versioned/historical table.
 - **Limit tier is derived, not stored**: `tier_for_user()` maps
@@ -193,6 +201,13 @@ sections in `functional_requirements.pdf`.
   they never collide with dev/demo queue data in DB 0. This does mean the
   test suite now has a hard runtime dependency on a local Redis instance
   being reachable - it wasn't required before this change.
+- **The live exchange-rate API call is mocked by default (autouse)** in
+  the test suite (`tests/conftest.py`'s `_fallback_exchange_rate`
+  fixture forces the deterministic configured-rate fallback) - almost
+  every quote/cash-out test asserts exact fee math and would otherwise
+  depend on whatever a live third-party rate happens to be at test-run
+  time. `tests/test_exchange_rate.py` specifically tests the live-fetch,
+  caching, and fallback behavior in isolation.
 - **Performance testing deliberately excludes XRPL settlement** from the
   concurrent-user load test (`perf/locustfile.py`) - mixing in real network
   calls would measure Testnet/faucet latency rather than this API's own

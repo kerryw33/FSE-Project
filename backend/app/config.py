@@ -17,9 +17,15 @@ class Settings(BaseSettings):
     session_expire_hours: int = 12
     kyc_encryption_key: str = ""
 
-    # FR-13: fixed, configured USD/ZAR rate for this slice. Swappable later
-    # for a public API without touching any caller of get_usd_zar_rate().
+    # FR-13: a live public exchange-rate API is the primary source, with
+    # this fixed value as the fallback if that API is unreachable or
+    # returns something unexpected - quote creation shouldn't break just
+    # because a free third-party service had a blip. See
+    # app/services/exchange_rate.py.
     usd_zar_rate: float = 18.50
+    exchange_rate_api_url: str = "https://open.er-api.com/v6/latest/USD"
+    exchange_rate_cache_seconds: int = 300
+    exchange_rate_timeout_seconds: float = 5.0
 
     # XRPL Testnet Integration (FR-27-29). Issuer/currency are config, not
     # hardcoded, so switching between the fallback UCTUSD IOU and the real
