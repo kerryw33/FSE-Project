@@ -210,3 +210,67 @@ def test_sender_can_view_own_remittance_history(client, approved_sender):
     history_b = client.get("/remittances/me", headers=headers_b).json()
     assert len(history_a) == 1
     assert len(history_b) == 0
+
+
+# --- Tests below specifically prove Redis is the real transport, not just
+# that the end-to-end API result looks right (which the tests above
+# already cover and would pass even against the old DB-polling queue). ---
+
+
+def test_confirm_cash_in_publishes_to_redis_stream(client, approved_sender, admin_headers):
+    from app.services.redis_client import get_redis_client
+    from app.services.settlement import STREAM_NAME
+
+    sender_headers = approved_sender()
+    remittance_id = _linked_beneficiary_and_quote(client, sender_headers, "rr1@example.com", "+27000000901")
+
+    redis_client = get_redis_client()
+    assert redis_client.xlen(STREAM_NAME) == 0
+
+    _confirmed_remittance(client, sender_headers, admin_headers, remittance_id)
+
+    assert redis_client.xlen(STREAM_NAME) == 1
+    entries = redis_client.xrange(STREAM_NAME, "-", "+")
+    published_message_id = entries[0][1]["settlement_message_id"]
+
+    db_message = client.get("/admin/settlement?message_status=pending", headers=admin_headers).json()[0]
+    assert published_message_id == db_message["id"]
+
+
+def test_settlement_run_acks_the_stream_entry(
+    client, approved_sender, admin_headers, platform_wallet_row, mock_xrpl
+):
+    from app.services.redis_client import get_redis_client
+    from app.services.settlement import GROUP_NAME, STREAM_NAME
+
+    sender_headers = approved_sender()
+    remittance_id = _linked_beneficiary_and_quote(client, sender_headers, "rr2@example.com", "+27000000902")
+    _confirmed_remittance(client, sender_headers, admin_headers, remittance_id)
+
+    client.post("/admin/settlement/run", headers=admin_headers)
+
+    redis_client = get_redis_client()
+    pending = redis_client.xpending(STREAM_NAME, GROUP_NAME)
+    assert pending["pending"] == 0  # acked, not left claimed
+
+
+def test_retry_republishes_to_redis_stream(
+    client, approved_sender, admin_headers, platform_wallet_row, mock_xrpl
+):
+    from app.services.redis_client import get_redis_client
+    from app.services.settlement import STREAM_NAME
+
+    mock_xrpl["should_fail"] = True
+    sender_headers = approved_sender()
+    remittance_id = _linked_beneficiary_and_quote(client, sender_headers, "rr3@example.com", "+27000000903")
+    _confirmed_remittance(client, sender_headers, admin_headers, remittance_id)
+    client.post("/admin/settlement/run", headers=admin_headers)
+
+    redis_client = get_redis_client()
+    length_after_failure = redis_client.xlen(STREAM_NAME)
+
+    failed = client.get("/admin/settlement?message_status=failed", headers=admin_headers).json()
+    message_id = next(m["id"] for m in failed if m["remittance_id"] == remittance_id)
+    client.post(f"/admin/settlement/{message_id}/retry", headers=admin_headers)
+
+    assert redis_client.xlen(STREAM_NAME) == length_after_failure + 1

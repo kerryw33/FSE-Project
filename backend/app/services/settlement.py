@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import redis
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.money import to_decimal
@@ -7,14 +8,38 @@ from app.models.remittance import Remittance, RemittanceStatus
 from app.models.settlement import SettlementMessage, SettlementMessageStatus
 from app.services.platform_wallet import get_platform_wallet_row
 from app.services.recipient_wallet import ensure_xrpl_account, get_or_create_wallet_row
+from app.services.redis_client import get_redis_client
 from app.services.xrpl_provisioning import submit_issued_currency_payment
+
+# FR-21/22: the settlement queue, as a Redis Stream (basics.pdf recommends
+# RabbitMQ/Redis Streams over a DB-polling table). Entries just carry a
+# SettlementMessage id - the durable record of status/outcome/tx-hash stays
+# in that DB row (FR-23/NFR-09 need it queryable regardless of queue tech),
+# so the stream is purely the transport that wakes a consumer up.
+STREAM_NAME = "settlement_messages"
+GROUP_NAME = "settlement_workers"
+CONSUMER_NAME = "worker-1"  # FR-22 names "a settlement worker", singular
+
+
+def _ensure_consumer_group(client: redis.Redis) -> None:
+    try:
+        client.xgroup_create(STREAM_NAME, GROUP_NAME, id="0", mkstream=True)
+    except redis.ResponseError as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
+def _push_to_stream(client: redis.Redis, settlement_message_id: str) -> None:
+    _ensure_consumer_group(client)
+    client.xadd(STREAM_NAME, {"settlement_message_id": settlement_message_id})
 
 
 def enqueue_settlement(db: DBSession, remittance: Remittance) -> SettlementMessage:
     """FR-21: place a settlement message on the queue once cash-in is
     confirmed. Idempotent per remittance - the unique constraint on
     remittance_id means calling this twice for the same remittance just
-    returns the existing message rather than creating a second one.
+    returns the existing message rather than creating a second one (and
+    never re-publishes to the stream either).
     """
     existing = db.query(SettlementMessage).filter(SettlementMessage.remittance_id == remittance.id).first()
     if existing is not None:
@@ -26,6 +51,30 @@ def enqueue_settlement(db: DBSession, remittance: Remittance) -> SettlementMessa
     db.add(remittance)
     db.commit()
     db.refresh(message)
+
+    _push_to_stream(get_redis_client(), message.id)
+    return message
+
+
+def retry_settlement_message(db: DBSession, message: SettlementMessage) -> SettlementMessage:
+    """Not mandated by any FR, but FR-24's failure handling is only useful
+    in practice if a failed settlement can be tried again. Resets the DB
+    row and re-publishes to the stream - a message that failed doesn't
+    get automatically redelivered by Redis once acked, so without this it
+    would sit FAILED forever with no consumer ever seeing it again.
+    """
+    message.status = SettlementMessageStatus.PENDING
+    message.failure_reason = None
+    db.add(message)
+
+    message.remittance.status = RemittanceStatus.SETTLEMENT_QUEUED
+    message.remittance.settlement_failure_reason = None
+    db.add(message.remittance)
+
+    db.commit()
+    db.refresh(message)
+
+    _push_to_stream(get_redis_client(), message.id)
     return message
 
 
@@ -97,10 +146,29 @@ def process_settlement_message(db: DBSession, message: SettlementMessage) -> Set
     return message
 
 
-def process_pending_settlements(db: DBSession) -> list[SettlementMessage]:
-    """FR-22: the settlement worker's main loop body - claim every PENDING
-    message and process it. This is what both the standalone worker
-    script and the admin-triggered manual run call.
+def process_pending_settlements(db: DBSession, count: int = 50, block_ms: int = 500) -> list[SettlementMessage]:
+    """FR-22: the settlement worker's main loop body - read whatever's
+    waiting on the Redis Stream, process each one, and ack it. This is
+    what both the standalone worker script and the admin-triggered manual
+    run call.
+
+    Acks immediately after processing regardless of outcome - retries are
+    handled explicitly via retry_settlement_message(), not via Redis's own
+    pending-entry redelivery, so a message is never left claimed-but-
+    unacked for something else to pick up later.
     """
-    pending = db.query(SettlementMessage).filter(SettlementMessage.status == SettlementMessageStatus.PENDING).all()
-    return [process_settlement_message(db, message) for message in pending]
+    client = get_redis_client()
+    _ensure_consumer_group(client)
+
+    response = client.xreadgroup(GROUP_NAME, CONSUMER_NAME, {STREAM_NAME: ">"}, count=count, block=block_ms)
+
+    results = []
+    for _stream_name, entries in response:
+        for entry_id, fields in entries:
+            settlement_message_id = fields.get("settlement_message_id")
+            message = db.query(SettlementMessage).filter(SettlementMessage.id == settlement_message_id).first()
+            if message is not None:
+                results.append(process_settlement_message(db, message))
+            client.xack(STREAM_NAME, GROUP_NAME, entry_id)
+
+    return results

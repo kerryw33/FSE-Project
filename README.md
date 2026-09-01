@@ -10,8 +10,8 @@ All functional requirements (FR-01 through FR-35, including lettered
 sub-requirements) from `functional_requirements.pdf` are implemented and
 tested - registration/login/logout/profile, KYC + admin review, beneficiary
 management with auto-linking, quote/fee/limit calculation with admin config,
-simulated cash-in, a DB-backed settlement queue + worker that submits real
-XRPL Payment transactions, the recipient's custodial wallet, sender
+simulated cash-in, a Redis Streams settlement queue + worker that submits
+real XRPL Payment transactions, the recipient's custodial wallet, sender
 transaction history, and simulated cash-out with admin actioning. Not yet
 done: the web front end (currently API-only, explorable via `/docs`) and the
 performance-testing deliverable.
@@ -22,6 +22,8 @@ FastAPI + SQLAlchemy + SQLite (dev), per `basics.pdf`'s recommendations.
 Passwords hashed with bcrypt via passlib. Sessions are opaque bearer tokens
 stored in a `sessions` table (not JWT) so logout can just revoke a row.
 XRPL integration uses `xrpl-py` against the public Testnet JSON-RPC endpoint.
+The settlement queue is Redis Streams (`redis-py`), per basics.pdf's
+recommendation - requires a local Redis instance (`brew install redis`).
 
 ## Key assumptions (to carry into the technical specification)
 
@@ -44,11 +46,14 @@ XRPL integration uses `xrpl-py` against the public Testnet JSON-RPC endpoint.
   scarce token liquidity (XRP funding and TrustLines are free/unlimited via
   the faucet). `RecipientWallet.balance` is a cached ledger view of that
   account's real on-chain balance.
-- **Message queue**: implemented as a DB-backed table (`SettlementMessage`)
-  rather than RabbitMQ/Redis Streams/Kafka - none were available to stand up
-  in this environment (no broker installed, Docker daemon not running). The
-  enqueue/claim/ack contract matches a real broker, so swapping one in later
-  only touches `app/services/settlement.py`.
+- **Message queue**: Redis Streams (`app/services/settlement.py`), per
+  basics.pdf's "lowest-friction options to stand up locally" recommendation.
+  A consumer group (`settlement_workers`) reads entries and acks them after
+  processing; the durable record of status/outcome/tx-hash (FR-23, NFR-09)
+  stays in the `SettlementMessage`/`Remittance` DB rows regardless - Redis is
+  purely the transport that wakes a consumer up, not the source of truth.
+  No automatic redelivery-on-crash (PEL reclaim) is implemented; a stuck
+  message needs the admin retry endpoint, which explicitly re-publishes.
 - **Fee model**: a single admin-editable `FeeConfig` row (fixed fee, %
   fee, FX margin, cash-out fee) rather than a versioned/historical table.
 - **Limit tiers (FR-16b)**: derived from KYC status (approved → `verified`,
@@ -61,6 +66,8 @@ XRPL integration uses `xrpl-py` against the public Testnet JSON-RPC endpoint.
 ## Running locally
 
 ```bash
+brew install redis && brew services start redis   # once per machine
+
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -99,4 +106,8 @@ python -m pytest -q
 All XRPL network calls (faucet funding, TrustSet, Payment) are mocked in the
 test suite (see the `mock_xrpl` fixture in `tests/conftest.py`) so it runs
 fast and offline - the real integration is exercised manually against the
-live Testnet instead.
+live Testnet instead. Redis, however, is real in tests - it's fast and
+local, so there's no need to mock it. Tests use DB 15 (a conventional
+scratch database), flushed before every test, kept separate from dev/demo
+data in DB 0.
+

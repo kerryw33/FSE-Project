@@ -3,6 +3,9 @@ import os
 os.environ.setdefault("KYC_ENCRYPTION_KEY", "wSMlvW7WkYVBLl9x8-x0LICU95hqHRvA1LGjXhh2eKI=")
 os.environ.setdefault("XRPL_KEY_ENCRYPTION_KEY", "pkTualMz1bJ2RUeoHK5dHWCE-9kuVxqWxc_fB7KQRK0=")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+# DB 15 is the conventional "scratch/test" Redis database - kept separate
+# from the dev/demo queue (DB 0) so tests never see or clobber real data.
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +38,9 @@ app.dependency_overrides[get_db] = override_get_db
 @pytest.fixture(autouse=True)
 def _fresh_database():
     from app.services.bootstrap import seed_defaults
+    from app.services.redis_client import get_redis_client
+
+    get_redis_client().flushdb()
 
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()

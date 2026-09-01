@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # leak of one secret category doesn't automatically expose the other.
     xrpl_key_encryption_key: str = ""
 
+    # Message queue (FR-21/22): Redis Streams, per basics.pdf's recommendation
+    # ("lowest-friction options to stand up locally"). Tests point this at a
+    # separate DB number so they never collide with dev/demo data.
+    redis_url: str = "redis://localhost:6379/0"
+
 
 @lru_cache
 def get_settings() -> Settings:

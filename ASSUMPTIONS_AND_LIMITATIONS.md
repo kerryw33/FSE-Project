@@ -75,14 +75,28 @@ sections in `functional_requirements.pdf`.
   (`quoted` → `cash_in_pending` → `cash_in_confirmed` → `settlement_queued`
   → `settled`/`settlement_failed`) as one evolving record rather than
   separate tables per stage.
-- **Message queue is a DB-backed table**, not RabbitMQ/Redis
-  Streams/Kafka - none were available to stand up in this environment (no
-  broker installed, Docker daemon not running locally). The
-  enqueue/claim/ack contract matches what a real broker provides, so
-  swapping one in later only touches `app/services/settlement.py`.
+- **Message queue is Redis Streams** (`app/services/settlement.py`), per
+  basics.pdf's explicit recommendation ("lowest-friction options to stand
+  up locally"). A single consumer group (`settlement_workers`, one
+  consumer, matching FR-22's singular "a settlement worker") reads
+  entries and acks them once processed. The durable record of
+  status/outcome/tx-hash still lives in the `SettlementMessage`/
+  `Remittance` DB rows regardless of queue technology - Redis is the
+  transport, not the source of truth, which is why switching from the
+  earlier DB-polling prototype only touched one service file and no
+  correctness logic (`process_settlement_message`) at all.
+- **No PEL reclaim / redelivery-on-crash**: if a worker died mid-processing
+  after Redis delivered it a message but before acking, that entry would
+  sit in the consumer group's pending-entries list rather than being
+  automatically handed to another consumer (`XCLAIM`/`XAUTOCLAIM` isn't
+  implemented). Recovery in that scenario would need manual inspection -
+  in practice this project only ever runs one consumer, so it's a real
+  gap rather than a mitigated one.
 - **No automatic retry** for a failed settlement message - an admin must
-  explicitly retry it (`POST /admin/settlement/{id}/retry`). There's no
-  backoff/scheduling logic.
+  explicitly retry it (`POST /admin/settlement/{id}/retry`), which resets
+  the DB row and re-publishes to the stream (a failed-and-acked message
+  is not redelivered by Redis on its own). There's no backoff/scheduling
+  logic.
 
 ## Recipient Wallet (FR-27–29)
 
@@ -163,6 +177,12 @@ sections in `functional_requirements.pdf`.
   verified separately and manually against the live Testnet (see commit
   history and `backend/scripts/smoke_test.sh`), not by the automated suite
   itself.
+- **Redis is real (not mocked) in the test suite** - it's fast and local,
+  unlike the XRPL Testnet, so there's no benefit to mocking it. Tests
+  point at a dedicated Redis DB number (15, flushed before every test) so
+  they never collide with dev/demo queue data in DB 0. This does mean the
+  test suite now has a hard runtime dependency on a local Redis instance
+  being reachable - it wasn't required before this change.
 - **Performance testing deliberately excludes XRPL settlement** from the
   concurrent-user load test (`perf/locustfile.py`) - mixing in real network
   calls would measure Testnet/faucet latency rather than this API's own

@@ -57,27 +57,35 @@ because settlement makes real network calls to the XRP Ledger Testnet -
 mixing that into the concurrent-user run would measure Testnet/faucet
 latency rather than this API's own performance.
 
+Re-measured 2026-09-01 after swapping the settlement queue from a
+DB-polling table to Redis Streams (basics.pdf's recommendation) - enqueue
+now does a DB write *and* a Redis `XADD` round-trip, so the throughput
+number below is a bit lower than an earlier DB-only measurement, which is
+expected and not a regression to worry about.
+
 | Metric | Result |
 |---|---:|
-| Message-queue enqueue throughput | 200 messages in 0.318s → **629 msg/s** |
-| RLUSD/UCTUSD settlement processing time | 5 real Testnet transactions in 85.2s → **17.0s/transaction avg** |
+| Message-queue enqueue throughput (Redis Streams) | 200 messages in 0.387s → **517 msg/s** |
+| RLUSD/UCTUSD settlement processing time | 5 real Testnet transactions in 61.9s → **12.4s/transaction avg** |
 | Settlement success rate | 5/5 (100%) |
 
-**Bottleneck identified — XRPL ledger consensus time:** enqueueing is pure
-SQLite writes and is fast (629 msg/s, not a concern at this project's
-scale). Settlement is a different story: each transaction has to be
-submitted and then wait for XRPL Testnet to close and validate a ledger
+**Bottleneck identified — XRPL ledger consensus time:** enqueueing (a
+SQLite write plus a Redis `XADD`) is fast and not a concern at this
+project's scale. Settlement is a different story: each transaction has to
+be submitted and then wait for XRPL Testnet to close and validate a ledger
 (`submit_and_wait`) before the API considers it confirmed - the XRP Ledger
 targets a ~3-5s ledger close time, so a handful of seconds per transaction
 is inherent to using a real blockchain for settlement, not something the
-application code can optimize away. The ~17s average also reflects real
-Testnet variability (congestion, retries against `LastLedgerSequence`) on
-the day of this run. Practical implication: the settlement worker's
-throughput ceiling is roughly the ledger's own transaction rate, not
-anything in `app/services/settlement.py` - if remittance volume ever
-needed to exceed that, the mitigation is standard queue-worker scaling
-(processing the DB-backed queue with multiple concurrent workers) rather
-than optimizing the per-transaction path, since each transaction already
+application code can optimize away. The ~12s average also reflects real
+Testnet variability (congestion, retries against `LastLedgerSequence`)
+between runs - an earlier run on 2026-08-31 saw ~17s/transaction with the
+same code, purely due to network conditions that day. Practical
+implication: the settlement worker's throughput ceiling is roughly the
+ledger's own transaction rate, not anything in `app/services/settlement.py`
+- if remittance volume ever needed to exceed that, the mitigation is
+standard queue-worker scaling (adding more consumers to the
+`settlement_workers` Redis consumer group) rather than optimizing the
+per-transaction path, since each transaction already
 does the minimum required work.
 
 ## 3. Concurrent-use behaviour and failure rates
@@ -94,6 +102,8 @@ does the minimum required work.
 ## How to reproduce
 
 ```bash
+brew services start redis                       # if not already running
+
 cd backend
 source .venv/bin/activate
 python -m scripts.setup_platform_wallet        # once per environment

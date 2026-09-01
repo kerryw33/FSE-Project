@@ -3,11 +3,11 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.deps import require_admin
 from app.database import get_db
-from app.models.remittance import RemittanceStatus
 from app.models.settlement import SettlementMessage, SettlementMessageStatus
 from app.models.user import User
 from app.schemas.settlement import SettlementMessageOut
 from app.services.settlement import process_pending_settlements
+from app.services.settlement import retry_settlement_message as _retry_settlement_message
 
 router = APIRouter(prefix="/admin/settlement", tags=["settlement"])
 
@@ -46,14 +46,4 @@ def retry_settlement_message(
     if message.status != SettlementMessageStatus.FAILED:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only a failed message can be retried")
 
-    message.status = SettlementMessageStatus.PENDING
-    message.failure_reason = None
-    db.add(message)
-
-    message.remittance.status = RemittanceStatus.SETTLEMENT_QUEUED
-    message.remittance.settlement_failure_reason = None
-    db.add(message.remittance)
-
-    db.commit()
-    db.refresh(message)
-    return message
+    return _retry_settlement_message(db, message)
