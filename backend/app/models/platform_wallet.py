@@ -16,8 +16,7 @@ class PlatformWallet(Base):
     """FR-27/FR-29 infrastructure: the single custodial XRPL Testnet wallet
     the platform holds RLUSD/UCTUSD in.
 
-    Assumption (see project memory "pooled wallet architecture"): the
-    project brief offers a choice between a separate on-chain account per
+    The project brief offers a choice between a separate on-chain account per
     recipient or one platform wallet with per-customer balances tracked
     internally. This project uses the pooled model - only one row should
     ever exist here, and per-recipient "wallets" (see RecipientWallet) are

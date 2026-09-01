@@ -19,8 +19,24 @@ def _token() -> str:
 class Session(Base):
     """An opaque bearer session token (FR-02/FR-02a).
 
-    Chosen over a JWT so that logout can simply revoke the row -
-    no blacklist bookkeeping needed to make "terminate session" real.
+    Assumption: neither functional_requirements.pdf nor project_brief.pdf
+    mandates a specific token mechanism - FR-02/FR-02a just require login
+    with credentials and a logout that "terminates their session." JWT
+    would satisfy the letter of that, but not really the spirit: a JWT is
+    stateless by design, so the server never holds a copy of it and has
+    nothing to delete on logout - the token stays cryptographically valid
+    until it expires no matter what the server does. Making logout actually
+    revoke access would mean adding a blacklist table (revoked token IDs)
+    or a per-user token-version counter, either of which is a row the
+    server tracks and can invalidate - i.e. the same shape as this table,
+    just with JWT's signing/claims/expiry machinery layered on top. That
+    machinery earns its keep when multiple independent services need to
+    verify a token without calling back to the auth service; this project
+    is a single FastAPI backend, so there's no second verifier to benefit.
+
+    An opaque token looked up against this table gets the same security
+    properties (unguessable, revocable, expiring) with logout being a
+    single UPDATE (revoked_at = now()) instead of token-blacklist upkeep.
     """
 
     __tablename__ = "sessions"
