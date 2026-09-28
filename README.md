@@ -2,11 +2,9 @@
 
 UCT ECO5040W **Group 3** (Annita Ngoma, Karabo Tigedi, Kerry-Lynn Whyte, Lilitha Mzamo, Nikola Milosavljevic).
 
-Baobab aims
-
 This repository (`kerryw33/FSE-Project`) is the main source for the project. The API here is the patched system (quote TTL and cancel, hashed sessions, Alembic, settlement outbox / PEL reclaim, honest wallet balances, UCTUSD burn). **138** pytest tests collected on this tree.
 
-Academic prototype only: simulated ZAR cash-in, UCTUSD settlement on the XRP Ledger **Testnet**, simulated fiat cash-out with on-chain burn to issuer. No real customer funds, no Mainnet credentials.
+This is an academic prototype only: simulated ZAR cash-in, UCTUSD settlement on the XRP Ledger **Testnet**, simulated fiat cash-out with on-chain burn to issuer. No real customer funds, no Mainnet credentials.
 
 ## What the app does
 
