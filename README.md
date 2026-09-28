@@ -1,10 +1,28 @@
-# XRPL-Based FX Remittance Platform (UCTUSD on Testnet)
+# Baobab: XRPL-Based FX Remittance Platform (UCTUSD on Testnet)
 
 UCT ECO5040W **Group 3** (Annita Ngoma, Karabo Tigedi, Kerry-Lynn Whyte, Lilitha Mzamo, Nikola Milosavljevic).
+
+Baobab aims
 
 This repository (`kerryw33/FSE-Project`) is the main source for the project. The API here is the patched system (quote TTL and cancel, hashed sessions, Alembic, settlement outbox / PEL reclaim, honest wallet balances, UCTUSD burn). **138** pytest tests collected on this tree.
 
 Academic prototype only: simulated ZAR cash-in, UCTUSD settlement on the XRP Ledger **Testnet**, simulated fiat cash-out with on-chain burn to issuer. No real customer funds, no Mainnet credentials.
+
+## What the app does
+
+Baobab lets a sender in South Africa pay in rand and have the money arrive with a recipient as a USD stablecoin on the XRP Ledger, with the exchange rate, fees and every step of the transfer visible along the way.
+
+1. **Sign up and verify.** Senders and recipients register and submit KYC. An admin approves them. Each user's verification tier sets daily and monthly sending limits.
+2. **Add a beneficiary.** The sender links a recipient by the mobile number or email the recipient registered with.
+3. **Lock a quote.** The sender enters a ZAR amount and gets a quote: the live USD/ZAR rate, a fixed fee plus a percentage fee, and the UCTUSD the recipient will receive. The quote is held for a short time and can be cancelled.
+4. **Cash in.** The sender pays in ZAR (simulated), and an admin confirms the cash-in.
+5. **Settle on-chain.** A settlement worker picks the transfer off a Redis queue and pays UCTUSD from the platform's treasury wallet to the recipient's own custodial XRPL Testnet account. The first payment to a recipient creates that account. Each settlement is a real Testnet Payment with a transaction hash.
+6. **Track.** The sender follows the transfer's status timeline, and the recipient sees the balance and transaction hash in their wallet. Both link to the Testnet explorer.
+7. **Cash out.** The recipient asks to cash out to fiat (simulated), after a cash-out fee. Once an admin approves and completes it, the UCTUSD is burned by paying it back to the issuer.
+
+**Admin tools:** KYC queue, cash-in confirmation, settlement runs and retries, cash-out approval, fee and limit configuration, and the platform wallet's XRP and UCTUSD balances.
+
+**Security:** passwords are hashed, sessions use hashed tokens, and KYC data and XRPL wallet keys are encrypted at rest with two separate keys kept in `.env`, never in the database.
 
 ## Reports (deliverable i)
 
@@ -162,9 +180,9 @@ python -m pytest -q
 
 ## Optional: public URL
 
-`render.yaml` + `deploy/` host the UI and API on one Render link (useful for sharing on WhatsApp). Not required for the course.
+`render.yaml` + `deploy/` host the UI and API on one Render link (useful for sharing on WhatsApp). Not required for the course so we did not do this.
 
 ## Performance numbers
 
-[`PERFORMANCE_TESTING.md`](PERFORMANCE_TESTING.md) is deliverable iv. HTTP load was **re-run on this fork on 2026-09-07** (50 users, 60 s, Windows): 2,218 requests, 0 failures, **37.2 req/s**, login median **850 ms** (bcrypt). Charts: [`backend/perf/results/charts.html`](backend/perf/results/charts.html). Live XRPL settlement on the same day: five Testnet Payments, **5/5**, **17.5 s/tx** avg (enqueue **29.2 msg/s** on this host). A larger re-run on **2026-09-24** settled **15/15** Testnet Payments at **15.1 s/tx** average.
+[`PERFORMANCE_TESTING.md`](PERFORMANCE_TESTING.md) is deliverable iv. HTTP load was **re-run on this fork on 2026-09-07** (50 users, 60 s, Windows): 2,218 requests, 0 failures, **37.2 req/s**, login median **850 ms** (bcrypt). Performance Charts can be seen at: [`backend/perf/results/charts.html`](backend/perf/results/charts.html). Live XRPL settlement on the same day: five Testnet Payments, **5/5**, **17.5 s/tx** avg (enqueue **29.2 msg/s** on this host). A larger re-run on **2026-09-24** settled **15/15** Testnet Payments at **15.1 s/tx** average.
 
